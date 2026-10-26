@@ -96,8 +96,11 @@ func resetSwitchCountForTest() {
 
 // takeSwitchBudget consumes one switch slot for authID on today's UTC+8 day;
 // false when the daily cap is exhausted (and whether it was newly capped, for
-// the once-per-day log line).
-func (s *switchDayState) takeSwitchBudget(authID string) (ok bool, newlyCapped bool) {
+// the once-per-day log line). The post-consumption count rides the return so
+// callers never read s.switches unlocked (a bare map read at the log line was
+// a data race under concurrency, and keyed the raw authID instead of the
+// resolved identity — review catch 2026-10-27).
+func (s *switchDayState) takeSwitchBudget(authID string) (ok bool, newlyCapped bool, count int) {
 	day := beijingDayNow()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,10 +109,11 @@ func (s *switchDayState) takeSwitchBudget(authID string) (ok bool, newlyCapped b
 		s.switches = map[string]int{}
 	}
 	s.switches[authID]++
-	if s.switches[authID] > identitySwitchDailyCap {
-		return false, s.switches[authID] == identitySwitchDailyCap+1
+	count = s.switches[authID]
+	if count > identitySwitchDailyCap {
+		return false, count == identitySwitchDailyCap+1, count
 	}
-	return true, false
+	return true, false, count
 }
 
 // identityFamilyFor returns the credential's effective outbound family:
@@ -169,10 +173,11 @@ func maybeSwitchIdentityFamily(authID string, sa *storedAuth) string {
 	if cur == "cli" {
 		next = "ide"
 	}
-	ok, newlyCapped := switchSpend.takeSwitchBudget(authIDOf(sa, authID))
+	id := authIDOf(sa, authID) // the budget's identity: explicit id, else the cooldown resolver's
+	ok, newlyCapped, spent := switchSpend.takeSwitchBudget(id)
 	if !ok {
 		if newlyCapped {
-			log.Printf("workbuddy: identity switch (%s): daily cap %d reached — staying on the %s lane for the rest of the UTC+8 day (#59)", authID, identitySwitchDailyCap, cur)
+			log.Printf("workbuddy: identity switch (%s): daily cap %d reached — staying on the %s lane for the rest of the UTC+8 day (#59)", id, identitySwitchDailyCap, cur)
 		}
 		return ""
 	}
@@ -185,7 +190,7 @@ func maybeSwitchIdentityFamily(authID string, sa *storedAuth) string {
 		log.Printf("workbuddy: identity switch (%s): persist failed, staying on the %s lane: %v", authID, cur, err)
 		return ""
 	}
-	log.Printf("workbuddy: identity switch (%s): %s -> %s after a 429 (quota lane change, sticky until next 429 or re-login, %d/%d today) (#59)", authID, cur, next, switchSpend.switches[authID], identitySwitchDailyCap)
+	log.Printf("workbuddy: identity switch (%s): %s -> %s after a 429 (quota lane change, sticky until next 429 or re-login, %d/%d today) (#59)", id, cur, next, spent, identitySwitchDailyCap)
 	return next
 }
 

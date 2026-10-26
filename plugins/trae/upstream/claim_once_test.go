@@ -52,9 +52,14 @@ func TestClaimOnceRegistry(t *testing.T) {
 	}
 
 	// The UTC+8 boundary itself: 2026-10-26 23:59 CST vs 2026-10-27 00:00 CST.
+	// Reset BEFORE freezing the clock: ResetClaimOnceForTest restores the
+	// clock seam to time.Now, so freezing first would let NoteClaimSent
+	// record the REAL UTC+8 day — a date-dependent flake that fails whenever
+	// the test runs on the same UTC+8 calendar day as t5 (caught live
+	// 2026-10-27 UTC+8; the committer's 10-26 run was green by luck of date).
 	t4, _ := time.Parse(time.RFC3339, "2026-10-26T15:59:00Z") // 23:59 UTC+8
-	claimOnceClock = func() time.Time { return t4 }
 	ResetClaimOnceForTest()
+	claimOnceClock = func() time.Time { return t4 }
 	NoteClaimSent("uid-boundary")
 	t5, _ := time.Parse(time.RFC3339, "2026-10-26T16:01:00Z") // 00:01 UTC+8 next day
 	claimOnceClock = func() time.Time { return t5 }
