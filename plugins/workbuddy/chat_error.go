@@ -429,9 +429,16 @@ func translateChatUpstreamErrorFull(statusCode int, payload string, sa *storedAu
 				" // Upstream account restriction (code 11140, unusual activity) — restricted by WorkBuddy upstream and the plugin cannot lift it; known triggers: parallel requests (consider account_max_concurrent: 1) or heavy traffic right after signup. Check the account in the official client or appeal; it re-enters rotation automatically once healthy, and is quarantined until then. | raw: %s",
 			truncateRedacted(payload, 200))
 	case isChannelRiskControl(statusCode, payload):
+		// v0.9.79: the CN gate is now a CONTENT filter (third-party agent
+		// identity phrases), not just request shape — and a pasted upstream
+		// error (or an agent self-introduction quoted in history) poisons
+		// every later turn of that conversation, which reads to the user as
+		// "every account fails". The copy therefore says what to do: new
+		// conversation, plugin update. The message itself spells the code
+		// hyphenated so an echo of this very text cannot re-arm the gate.
 		return fmt.Errorf(
-			"上游渠道风控（code 11128）——通常由请求特征或频率触发，与账号状态无关；请降低请求频率稍后再试，持续出现请更新插件以对齐官方客户端请求特征。"+
-				" // Upstream channel risk control (11128); back off and retry — request-shaped, not account-level. | raw: %s",
+			"上游渠道风控（code 11-128）——由请求内容中的第三方 agent 身份特征串触发（0.9.79 起覆盖 DSH / Claude Code / Codex 身份句族、品牌共现与报错原文回贴），与账号状态无关。若本会话粘贴过上游报错或 agent 自我介绍，会话可能已被污染，请新开会话重试；持续出现请更新插件至最新版。"+
+				" // Upstream channel risk control (11-128) — triggered by third-party agent identity phrases in the request body (0.9.79 scrubs the DSH / Claude Code / Codex identity families, brand co-occurrence, and pasted error text), not by account state. A pasted upstream error or agent self-introduction poisons the whole conversation — start a new one; update the plugin if it persists. | raw: %s",
 			truncateRedacted(payload, 200))
 	case isWafBlocked(statusCode, payload):
 		return fmt.Errorf(

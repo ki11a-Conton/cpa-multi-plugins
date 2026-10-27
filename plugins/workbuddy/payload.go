@@ -62,6 +62,16 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
 	// not in scope here.
 	sanitizeHistoryPhrasesInPlace(obj)
 
+	// 3.25 sanitizeIdentity: the generalized self-introduction family
+	// (verb table) and the DSH brand shrink, scoped to system/developer/
+	// assistant only — the #574 boundary matrix shows the identity
+	// sentences pass from a user message while 400ing from assistant
+	// history, and rewriting user/tool content would desync the model's
+	// view from what is on disk (#537). Runs AFTER 3.2 so the specific
+	// phrase rewrites (which need the intact brand) win first, and BEFORE
+	// the 3.5 reasoning fold so folded reasoning cannot re-arm the family.
+	sanitizeIdentityInPlace(obj)
+
 	// 3.3 typeUnionToolSchemas: a oneOf of objects with no type gets
 	// type:object — kimi-k3.1-pro 400s "Invalid request parameters" on the
 	// untyped union even when every branch is an object, and takes the same
@@ -954,6 +964,77 @@ var (
 	// Swap it for the verified-safe "web interface" phrasing.
 	reDeepSeekHarnessWebGUI          = regexp.MustCompile(`(?i)deepseek\s+harness\s+web\s+gui`)
 	deepSeekHarnessWebGUIReplacement = "DeepSeek Harness web interface"
+
+	// v0.9.79 (field report 2026-10-27, model deepseek-v4.1-flash): the
+	// 11-128 family was GENERALIZED server-side into a "client self-
+	// introduction sentence pattern + brand" gate. workbuddy2api-hub
+	// wb_proxy.py (#533/#537/#539, A/B-replayed against copilot.tencent.com)
+	// verified three members and then generalized the verb table after
+	// observing the upstream grow the rule one verb at a time:
+	//
+	//      You are an AI agent powered by DeepSeek Harness.
+	//      You are a coding agent powered by the deepseek-v4.1-flash model.
+	//      You are an AI assistant built on DeepSeek.
+	//
+	// The #574 boundary matrix (single-variable, CN realm only):
+	// assistant/system carrying the sentence → 400/11128; user carrying the
+	// same sentence → 200; inserting "the" before the brand → 200. So the
+	// matcher below is ported from the reference with its bounded window —
+	// up to three modifier words between article and verb, noun optional,
+	// comma tolerated between noun and verb — which is what keeps sentences
+	// like "You are free to use tools built by others" out of the match
+	// (the verb sits four words deep there). RE2 has no lookahead, so the
+	// sentence terminator is consumed and re-emitted by the replacer.
+	// DIVERGENCE from the reference (deliberate, precision): the match must
+	// start at a boundary — text start, newline, sentence punctuation +
+	// space, or an opening quote/bracket (agents and models QUOTE prompts:
+	// '"You are … powered by …"' in an assistant echo). Every confirmed
+	// trigger sentence is boundary-initial in its prompt, and the boundary
+	// keeps mid-sentence "you are" clauses ("The tools you are using were
+	// built by Acme.") out of the rewrite.
+	reIdentitySelfIntro = regexp.MustCompile(`(?i)(^|\n|[.!?;:,][ \t]+|["'(\[{][ \t]*)` +
+		`you are\s+` +
+		`(?:an?\s+|the\s+)?(?:[\w.-]+\s+){0,3}?` +
+		`(?:agent|assistant|model|ai|llm)?[\s,]*` +
+		`(?:powered\s+by|built\s+on|built\s+by|created\s+by|developed\s+by|made\s+by|trained\s+by)` +
+		`[^\n]*?(?:\.(?:[ \t\r"]|\n|$)|\n|$)`)
+	identitySelfIntroReplacement = "You are a helpful AI assistant."
+
+	// reBrandProse shrinks the DSH brand in prose ("DeepSeek Harness" →
+	// "DeepSeek") for the identity-scoped roles. #574's second finding: the
+	// brand alone passes, but brand + the GUI description phrases ("this
+	// page" / "this GUI" / "this app") co-occurring hits the same 11-128
+	// check; shrinking just the brand passes while keeping the sentence
+	// readable. Only space/tab-separated prose forms match — hyphenated or
+	// underscored identifiers (/opt/deepseek-harness/app, deepseek_harness)
+	// stay byte-identical (#574 measured that [ \t_-]* breaks them). Runs
+	// AFTER the Web GUI four-token rewrite above (that rule needs the full
+	// brand to match first).
+	reBrandProse          = regexp.MustCompile(`(?i)deepseek[ \t]+harness`)
+	brandProseReplacement = "DeepSeek"
+
+	// reAnthropicBillingHeader strips the x-anthropic-billing-header line
+	// Claude Code embeds in its first system block (magpie FLAGGED and
+	// workbuddy2api-hub SANITIZE_HDR_RE both remove it; member of the same
+	// 11-128 family). The bare-header rename below catches occurrences
+	// whose value was formatted differently (no colon-value shape).
+	reAnthropicBillingHeader = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\r\n]*;?\s*`)
+	reAnthropicBareHeader    = regexp.MustCompile(`(?i)x-anthropic-billing-header`)
+
+	// reCodexSecondSentence matches the Codex CLI base-instructions SECOND
+	// sentence on its own — the two-sentence reCodexCliIntro above needs
+	// the "You are a coding agent…" opener adjacent, but Codex Desktop and
+	// drifted releases send the attribution sentence alone (magpie FLAGGED
+	// matches it with a lookbehind guard; RE2 has none, so the optional
+	// "the " is absorbed and re-emitted, making the rewrite idempotent).
+	reCodexSecondSentence          = regexp.MustCompile(`(?i)\b(?:the\s+)?codex\s+cli\s+is\s+an\s+open\s+source\s+project\s+led\s+by\s+openai\s*\.?`)
+	codexSecondSentenceReplacement = "The Codex CLI is an open source project led by OpenAI."
+
+	// reOMOJunior matches the OhMyOpenCode junior-agent fingerprint — a
+	// confirmed contiguous 11-128 trigger (workbuddy2api-hub, A/B tested:
+	// either token alone passes, only the full phrase 400s).
+	reOMOJunior          = regexp.MustCompile(`(?i)sisyphus-junior\s*-\s*focused\s+executor\s+from\s+ohmyopencode`)
+	omoJuniorReplacement = "Sisyphus-Junior - Focused executor"
 )
 
 func sanitizeBlockedTemplates(s string) string {
@@ -982,6 +1063,25 @@ func sanitizeBlockedTemplates(s string) string {
 	// Web GUI" is a separate member of the same Tencent 11-128 phrase family
 	// (verified by replay: only the full four-token phrase triggers).
 	s = reDeepSeekHarnessWebGUI.ReplaceAllString(s, deepSeekHarnessWebGUIReplacement)
+	// v0.9.79: Codex attribution sentence standalone (no opener adjacent).
+	s = reCodexSecondSentence.ReplaceAllString(s, codexSecondSentenceReplacement)
+	// v0.9.79: Claude Code's first system block embeds its billing header
+	// as text; strip the value shape, then rename any bare leftovers.
+	s = reAnthropicBillingHeader.ReplaceAllString(s, "")
+	s = reAnthropicBareHeader.ReplaceAllString(s, "x-anthropic-billing-hdr")
+	// v0.9.79: Claude Code feedback line — "give" phrasing is the verified
+	// trigger spelling, "provide" passes (workbuddy2api-hub SANITIZE_REWRITES).
+	s = strings.ReplaceAll(s,
+		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues")
+	// v0.9.79: OhMyOpenCode junior-agent fingerprint.
+	s = reOMOJunior.ReplaceAllString(s, omoJuniorReplacement)
+	// v0.9.79: the error code itself, pasted as text (users quote the 503
+	// back into the agent while debugging), is a trigger and poisons every
+	// later turn of that conversation — the hyphenated spelling passes and
+	// reads the same. This is the poisoning-loop breaker; it runs in the
+	// all-roles set precisely because pastes land in user messages.
+	s = strings.ReplaceAll(s, "11128", "11-128")
 	return s
 }
 
@@ -1073,6 +1173,135 @@ func sanitizeHistoryPhrasesInPlace(obj map[string]any) bool {
 				}
 				if a, ok := fn["arguments"].(string); ok {
 					if r := scrub(a); r != a {
+						fn["arguments"] = r
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	return changed
+}
+
+// sanitizeIdentitySentences applies the generalized self-introduction
+// rewrites to one text blob: the verb-family sentence first, then the DSH
+// brand shrink. The brand shrink must run LAST — the Web GUI four-token
+// rewrite in sanitizeBlockedTemplates (which ran earlier in the pipeline)
+// needs the intact two-word brand to match its pattern.
+func sanitizeIdentitySentences(s string) string {
+	out := reIdentitySelfIntro.ReplaceAllStringFunc(s, func(m string) string {
+		// The match carries a sentence-boundary prefix (^ | \n | .!?;: +
+		// spaces) and may end on a consumed newline — RE2 has no lookahead,
+		// so both are split off and re-emitted around the neutral sentence.
+		// The prefix is pure ASCII boundary punctuation, and the body always
+		// begins with "you are", so the first non-boundary byte is the split
+		// point.
+		p := 0
+		for p < len(m) {
+			switch m[p] {
+			case '\n', '.', '!', '?', ';', ':', ',', ' ', '\t', '"', '\'', '(', '[', '{':
+				p++
+				continue
+			}
+			break
+		}
+		prefix := m[:p]
+		if strings.HasSuffix(m, "\n") {
+			return prefix + identitySelfIntroReplacement + "\n"
+		}
+		if n := len(m); n > 0 {
+			// A period terminated by a space/tab/CR/quote was
+			// consumed together with its follower — re-emit the
+			// follower so the next word keeps its gap and a JSON
+			// string value keeps its closing quote (identity
+			// sentences land inside tool_calls arguments).
+			switch m[n-1] {
+			case ' ', '\t', '\r', '"':
+				return prefix + identitySelfIntroReplacement + m[n-1:]
+			}
+		}
+		return prefix + identitySelfIntroReplacement
+	})
+	out = reBrandProse.ReplaceAllString(out, brandProseReplacement)
+	return out
+}
+
+// sanitizeIdentityInPlace applies sanitizeIdentitySentences to the
+// identity-scoped roles ONLY: system, developer and assistant (v0.9.79).
+//
+// Scope evidence — workbuddy2api-hub #574 single-variable matrix on the CN
+// realm: the identity sentence 400s (11-128) from system/developer/assistant
+// and passes (200) from user; #537's rationale for not touching user/tool:
+// those are user data, and rewriting them desyncs the model's view from what
+// is on disk. This deliberately DIVERGES from sanitizeHistoryPhrasesInPlace
+// (all roles): that pass carries phrases replay-verified to 400 from user
+// messages too (the Web GUI four-token phrase), this one does not.
+//
+// Covered surfaces per message: content (string and array text parts),
+// assistant reasoning_content/reasoning mirrors (scrubbed here so the step
+// 3.5 fold cannot re-arm the family in already-sanitized content), and
+// assistant tool_calls arguments (model-authored text where agents echo
+// protocol and identity prose).
+func sanitizeIdentityInPlace(obj map[string]any) bool {
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return false
+	}
+	changed := false
+	for _, mi := range msgs {
+		m, ok := mi.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "system", "developer", "assistant":
+		default:
+			continue
+		}
+		if rc, ok := m["reasoning_content"].(string); ok && rc != "" {
+			if r := sanitizeIdentitySentences(rc); r != rc {
+				m["reasoning_content"] = r
+				changed = true
+			}
+		}
+		if rc, ok := m["reasoning"].(string); ok && rc != "" {
+			if r := sanitizeIdentitySentences(rc); r != rc {
+				m["reasoning"] = r
+				changed = true
+			}
+		}
+		if c, ok := m["content"].(string); ok {
+			if r := sanitizeIdentitySentences(c); r != c {
+				m["content"] = r
+				changed = true
+			}
+		} else if parts, ok := m["content"].([]any); ok {
+			for _, pi := range parts {
+				p, ok := pi.(map[string]any)
+				if !ok {
+					continue
+				}
+				if t, ok := p["text"].(string); ok {
+					if r := sanitizeIdentitySentences(t); r != t {
+						p["text"] = r
+						changed = true
+					}
+				}
+			}
+		}
+		if tcs, ok := m["tool_calls"].([]any); ok {
+			for _, tci := range tcs {
+				tc, ok := tci.(map[string]any)
+				if !ok {
+					continue
+				}
+				fn, ok := tc["function"].(map[string]any)
+				if !ok || fn == nil {
+					continue
+				}
+				if a, ok := fn["arguments"].(string); ok {
+					if r := sanitizeIdentitySentences(a); r != a {
 						fn["arguments"] = r
 						changed = true
 					}

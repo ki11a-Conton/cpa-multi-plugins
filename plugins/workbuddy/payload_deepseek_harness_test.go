@@ -214,7 +214,11 @@ func TestUpstreamStatusError11128CarriesRequestScopedStatus(t *testing.T) {
 	if env.Error.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("envelope http_status = %d, want 400 (v8 IsRequestFault keying)", env.Error.HTTPStatus)
 	}
-	if !strings.Contains(env.Error.Message, "11128") {
+	// v0.9.79: the guidance spells the code hyphenated (11-128) — the raw
+	// payload below still carries the unhyphenated form, so this also pins
+	// that the RAW code stays visible for diagnosis while our own copy
+	// cannot re-arm the content gate when echoed back.
+	if !strings.Contains(env.Error.Message, "11-128") || !strings.Contains(env.Error.Message, `"code":11128`) {
 		t.Fatalf("bilingual guidance must survive the envelope, got %q", env.Error.Message)
 	}
 }
@@ -268,8 +272,11 @@ func TestSanitizeHistoryPhrasesAssistantEcho(t *testing.T) {
 	if !strings.Contains(ac, "Default branch (you will usually use this for PRs)") {
 		t.Errorf("assistant echo of the git line must be rewritten, got %q", ac)
 	}
-	if !strings.Contains(ac, "- the DeepSeek Harness web interface URL") {
-		t.Errorf("assistant echo must keep line structure, got %q", ac)
+	// v0.9.79: in identity roles the brand shrinks further after the
+	// four-token rewrite (#574: brand + GUI-description co-occurrence is
+	// the same 11-128 family; "DeepSeek" alone passes).
+	if !strings.Contains(ac, "- the DeepSeek web interface URL") {
+		t.Errorf("assistant echo must keep line structure with the shrunk brand, got %q", ac)
 	}
 	// Non-trigger content must stay byte-identical.
 	tail, _ := msgs[3].(map[string]any)
@@ -332,8 +339,12 @@ func TestSanitizeHistoryPhrasesToolCallsAndReasoning(t *testing.T) {
 	tc0, _ := tcs[0].(map[string]any)
 	fn, _ := tc0["function"].(map[string]any)
 	args, _ := fn["arguments"].(string)
-	if !strings.Contains(args, "DeepSeek Harness web interface") {
-		t.Errorf("tool_calls arguments must be scrubbed, got %q", args)
+	// v0.9.79: assistant tool_calls are identity-scoped — the four-token
+	// rewrite runs first (all roles), then the brand shrink (identity
+	// roles) takes "DeepSeek Harness web interface" down to "DeepSeek
+	// web interface".
+	if !strings.Contains(args, "DeepSeek web interface") {
+		t.Errorf("tool_calls arguments must be scrubbed with the shrunk brand, got %q", args)
 	}
 }
 
