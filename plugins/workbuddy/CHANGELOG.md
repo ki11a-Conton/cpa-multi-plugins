@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.78
+
+### The session-dead verdict reaches every caller in a 401 storm (review catch on 0.9.77)
+
+A real-concurrency storm test over the 0.9.77 heal (8 executor round trips against a live fake upstream, all carrying the dead token, refresh deliberately held 250ms so callers 2..N pile onto the in-flight renewal — the shape the existing tests never hit, since their instant refresh lets every later caller take the re-read path) exposed an observability gap, not a mechanical one: when the refresh was refused with the session-dead family (12153), only the renewal's OWNER surfaced the bilingual "请重新登录 / please sign in again" guidance — callers that JOINED that renewal, and callers throttled inside the 30s window right after it, still dumped the raw `upstream 401: <html>…openresty…</html>` page. The credential was correctly disabled either way (the owner's markSessionDead is idempotent) and every caller kept the account-level 401 status for the host cooldown — but 1 of N users got told what to do and N-1 got HTML.
+
+- `billing_401_renew.go`: the owner now records a session-dead refusal per credential (`billing401Refused`, cleared by the next successful renewal); joiners that wake to no new token, and throttled callers inside the window, inherit the recorded verdict instead of the raw 401. Every other throttle/failure cause keeps the exact pre-0.9.74 raw-401 surface — only the one shape that is a verdict on the credential propagates.
+- New `chat_401_storm_test.go`: `TestChatExecute_401StormConcurrentHeals` pins the happy storm (exactly ONE refresh round trip, all N callers answer, one persist, every healed resend carrying the new bearer) and `TestChatExecute_401StormSessionDead` pins the refusal storm (every caller carries the re-login guidance + the 401 status, no refresh stampede, disabled flag persisted).
+
 ## 0.9.77
 
 ### Chat-plane 401 self-heal: renew once and resend once (field report 2026-10-26, Buddycn account)

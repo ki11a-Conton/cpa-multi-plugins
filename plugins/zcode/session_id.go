@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 )
 
 // uuidFromHash renders 32 bytes of hash input as a lower-case UUIDv4-shaped
@@ -64,6 +65,15 @@ func firstUserMessageKey(payload []byte) (string, bool) {
 		if m.Role != "user" {
 			continue
 		}
+		// The degenerate empties (content missing, null, "", an empty or
+		// whitespace-only string, an empty parts array) must NOT become the
+		// key: each shape would hash to ONE constant session-id shared by
+		// every such conversation on every account (0.2.7 review catch:
+		// cross-conversation prompt-cache key collisions). The device
+		// fallback owns them — per-account stable, never a global constant.
+		if isEmptyishContent(m.Content) {
+			return "", false
+		}
 		if text, ok := textKeyOfContent(m.Content); ok && text != "" {
 			return text, true
 		}
@@ -72,6 +82,26 @@ func firstUserMessageKey(payload []byte) (string, bool) {
 		return string(m.Content), true
 	}
 	return "", false
+}
+
+// isEmptyishContent reports whether raw is content that carries nothing
+// identifiable: absent, null, an empty or whitespace-only string, or an
+// empty parts array. Anything else — including image-only parts arrays and
+// unparseable shapes — is NOT emptyish (those hash distinct per
+// conversation).
+func isEmptyishContent(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var s *string // null and "" both land here without error
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s == nil || strings.TrimSpace(*s) == ""
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return len(arr) == 0
+	}
+	return false
 }
 
 // textKeyOfContent reads a message content's text: a plain string as-is, or

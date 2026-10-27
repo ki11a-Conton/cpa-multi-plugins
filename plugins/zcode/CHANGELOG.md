@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.7
+
+### Empty first-user messages no longer collide every conversation's session-id (review catch on 0.2.6)
+
+A targeted edge test on 0.2.6's `conversationSessionID` found the degenerate shapes: a first user message whose content is MISSING, `null`, `""`, whitespace-only, or `[]` hashed its empty key into ONE constant UUID — the same `x-session-id` for every such conversation on every account. That violates the feature's own contract ("a different conversation gets a different one") and cross-contaminates BigModel's prompt-cache key exactly where the feature was supposed to create hits.
+
+- `session_id.go`: `isEmptyishContent` (absent / null / empty or whitespace-only string / empty array) routes those shapes to the DEVICE fallback — per-account stable, never a global constant; different accounts never collide. Image-only parts arrays and unparseable shapes keep the raw-bytes key (distinct per conversation) — their behavior is unchanged and now pinned.
+- New `session_id_edge_test.go`: the five empty shapes all land on the device fallback, the literal bug shape (two different conversations, same empty spelling) no longer shares an id, cross-account isolation, image-only distinctness, and the 0.2.6 contracts (cross-turn stability, cross-conversation distinctness) re-asserted.
+
 ## 0.2.6
 
 ### Every request names its conversation in x-session-id — BigModel's prompt cache hits (magpie zcode 2b56b3b, #388)

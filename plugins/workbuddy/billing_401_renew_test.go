@@ -18,16 +18,15 @@ import (
 
 func reset401RenewState(t *testing.T) {
 	t.Helper()
-	billing401Mu.Lock()
-	billing401LastRenew = map[string]time.Time{}
-	billing401InFlight = map[string]chan struct{}{}
-	billing401Mu.Unlock()
-	t.Cleanup(func() {
+	reset := func() {
 		billing401Mu.Lock()
 		billing401LastRenew = map[string]time.Time{}
 		billing401InFlight = map[string]chan struct{}{}
+		billing401Refused = map[string]error{}
 		billing401Mu.Unlock()
-	})
+	}
+	reset()
+	t.Cleanup(reset)
 }
 
 func stubHostAuthGetPhysical(t *testing.T, authIndex, name string, doc func() []byte) func() {

@@ -46,7 +46,37 @@ var (
 	// the running renewal and takes what it gave — magpie's renewing map
 	// semantics ("those who come while it runs get what it gave").
 	billing401InFlight = map[string]chan struct{}{}
+	// billing401Refused remembers the last renewal the upstream REFUSED
+	// with the session-dead family (0.9.78 storm fix): callers that joined
+	// that renewal, or hit the throttle window right after it, inherit the
+	// verdict — the raw-openresty-401 fallback stays for every other shape.
+	// Cleared by the next successful renewal; bounded by credential count.
+	billing401Refused = map[string]error{}
 )
+
+// billing401RefusalOf returns the recorded session-dead refusal for the
+// credential, nil when the last renewal succeeded (or none ran).
+func billing401RefusalOf(authIndex string) error {
+	billing401Mu.Lock()
+	defer billing401Mu.Unlock()
+	return billing401Refused[authIndex]
+}
+
+// billing401RecordRefusal remembers a session-dead refusal for joiners and
+// window-throttled callers (see billing401Refused).
+func billing401RecordRefusal(authIndex string, err error) {
+	billing401Mu.Lock()
+	billing401Refused[authIndex] = err
+	billing401Mu.Unlock()
+}
+
+// billing401ClearRefusal drops a stale refusal (the credential renewed
+// successfully — it is alive again).
+func billing401ClearRefusal(authIndex string) {
+	billing401Mu.Lock()
+	delete(billing401Refused, authIndex)
+	billing401Mu.Unlock()
+}
 
 // billing401Acquire decides this caller's role in the renewal for one
 // credential. Returns (join, owner):
@@ -140,9 +170,24 @@ func billing401RenewOnce(sa *storedAuth) (*storedAuth, error) {
 		if err2 == nil && after.Auth.AccessToken != "" && after.Auth.AccessToken != sa.Auth.AccessToken {
 			return after, nil
 		}
+		// The shared renewal we just waited out was refused session-dead:
+		// inherit its verdict — the credential is already flagged disabled
+		// by the owner's markSessionDead, and the caller's user deserves the
+		// re-login guidance as much as the owner's did (0.9.78 storm fix:
+		// in a fan-out only 1/N requests carried it, the rest dumped the
+		// openresty HTML page).
+		if sd := billing401RefusalOf(sa.authIndex); sd != nil {
+			return nil, sd
+		}
 		return nil, fmt.Errorf("401 renew: shared renewal produced no new token")
 	}
 	if !owner {
+		// Throttled right after a session-dead refusal: the credential is
+		// KNOWN dead — the verdict beats the raw 401 (0.9.78). Every other
+		// throttle cause keeps the pre-0.9.74 raw-401 surface.
+		if sd := billing401RefusalOf(sa.authIndex); sd != nil {
+			return nil, sd
+		}
 		return nil, fmt.Errorf("401 renew: throttled (last attempt inside the %s window)", billing401RenewWindow)
 	}
 	defer billing401Release(sa.authIndex)
@@ -150,10 +195,16 @@ func billing401RenewOnce(sa *storedAuth) (*storedAuth, error) {
 	data, raw, status, rerr := refreshCall(fresh)
 	if rerr != nil {
 		if status == http.StatusUnauthorized && isSessionDeadError(string(raw)) {
+			var sdErr error
 			if derr := markSessionDead(sa.authIndex, fresh.Account.UID, fresh); derr != nil {
-				return nil, fmt.Errorf("401 renew: %w; flag failed: %v", errBilling401SessionDead, derr)
+				sdErr = fmt.Errorf("401 renew: %w; flag failed: %v", errBilling401SessionDead, derr)
+			} else {
+				sdErr = fmt.Errorf("401 renew: %w (refresh refused)", errBilling401SessionDead)
 			}
-			return nil, fmt.Errorf("401 renew: %w (refresh refused)", errBilling401SessionDead)
+			// Record the refusal so joiners and window-throttled callers
+			// inherit the verdict (0.9.78 storm fix).
+			billing401RecordRefusal(sa.authIndex, sdErr)
+			return nil, sdErr
 		}
 		return nil, fmt.Errorf("401 renew: %w", rerr)
 	}
@@ -177,5 +228,7 @@ func billing401RenewOnce(sa *storedAuth) (*storedAuth, error) {
 	if err := persistAuthTokens(sa.authIndex, fresh); err != nil {
 		return nil, fmt.Errorf("401 renew: persist: %w", err)
 	}
+	// The credential is alive again — drop any recorded refusal (0.9.78).
+	billing401ClearRefusal(sa.authIndex)
 	return fresh, nil
 }
