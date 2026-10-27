@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.70
+
+### CALL_COUNT_LIMIT queue metadata survives the nested envelope (PR #65, sabercomo)
+
+Qoder can answer 10605 with the sub-code `CALL_COUNT_LIMIT` on the outer envelope while the actionable metadata (`retryAfterSeconds`, `modelKey`, `queueType`) rides the JSON-string child WITHOUT repeating `RESOURCE_LIMIT`. The queue parser recognized the outer code but only collected metadata from objects that themselves carried the identification — so a 17-second upstream hint fell back to the default 30-second wait, the model/queue fields vanished from logs, and the rendered line hard-coded `subCode=RESOURCE_LIMIT` with a "capacity limit, unrelated to the account" reading that a call-count ticket cannot support.
+
+- `queue_retry.go`: the walk now threads an `inQueue` flag down the `message`/`details` carriers of an IDENTIFIED envelope, collecting sub-code and metadata from its descendants; an unrelated sibling hanging off an unidentified layer cannot overwrite the ticket. `queueLimitLine` renders the actual sub-code (omitting it when absent, never inventing one) and cause-neutral guidance instead of the account-unrelated claim.
+- The `queue_limit` marker and the existing queue budget / wait cap / attempt limit / marker-keyed short (auth, model) cooldown are untouched.
+- Tests: nested CALL_COUNT_LIMIT metadata through both carriers, unrelated-sibling isolation, no-invented-sub-code — all three red on 0.8.69, green here (discriminability verified during review).
+
 ## 0.8.69
 
 ### A oneOf of objects with no type gets type:object — kmodel 502 fix (magpie qoder 0.2.35, #378)
