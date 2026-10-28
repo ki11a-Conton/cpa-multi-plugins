@@ -1035,6 +1035,19 @@ var (
 	// either token alone passes, only the full phrase 400s).
 	reOMOJunior          = regexp.MustCompile(`(?i)sisyphus-junior\s*-\s*focused\s+executor\s+from\s+ohmyopencode`)
 	omoJuniorReplacement = "Sisyphus-Junior - Focused executor"
+
+	// v0.9.80: the pasted-error poisoning-loop breaker as a word-boundary
+	// match. 0.9.79 used a bare substring replace, which also rewrote
+	// the code embedded inside longer digit runs (probe: ts=1729111280
+	// became ts=172911-1280, order 900111285 became 90011-1285) — user
+	// data the model was asked to read, corrupted silently. The gate's
+	// verified trigger shapes are the BARE code: "code 11128 ...",
+	// `{"code":11128,...}` — the digits as their own token. \b (ASCII
+	// word boundary) fires for every one of those (spaces, colons,
+	// commas, quotes, CJK neighbors are all non-word bytes) and leaves
+	// longer digit runs and letter-flanked forms untouched.
+	rePastedErrorCode          = regexp.MustCompile(`\b11128\b`)
+	pastedErrorCodeReplacement = "11-128"
 )
 
 func sanitizeBlockedTemplates(s string) string {
@@ -1081,7 +1094,17 @@ func sanitizeBlockedTemplates(s string) string {
 	// later turn of that conversation — the hyphenated spelling passes and
 	// reads the same. This is the poisoning-loop breaker; it runs in the
 	// all-roles set precisely because pastes land in user messages.
-	s = strings.ReplaceAll(s, "11128", "11-128")
+	// v0.9.80: word-boundary match instead of a bare substring replace —
+	// the gate trigger is the BARE code ("code 11128", `"code":11128`),
+	// where the digits stand as their own token; a 11128 embedded inside a
+	// longer digit run (timestamps like 1729111280, order numbers like
+	// 900111285) is ordinary user data, and rewriting it silently corrupted
+	// logs and code the model was asked to read (probe-verified on 0.9.79).
+	// \b keeps every known paste shape covered — spaces, punctuation and
+	// CJK neighbors are all non-word bytes, so the boundary fires — while
+	// longer digit runs (and letter-flanked forms like x11128x) pass
+	// through untouched, same as the reference's own trigger shape.
+	s = rePastedErrorCode.ReplaceAllString(s, pastedErrorCodeReplacement)
 	return s
 }
 

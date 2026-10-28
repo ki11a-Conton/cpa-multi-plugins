@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.80
+
+### The pasted-error breaker stops eating embedded digits (review catch on 0.9.79)
+
+0.9.79's poisoning-loop breaker (`11128` → `11-128`, all roles) was a bare substring replace, so it also rewrote the code embedded inside longer digit runs — probe on 0.9.79: `ts=1729111280` left as `ts=172911-1280`, `order 900111285` as `90011-1285`, `ref=311128` as `ref=311-128`. That is ordinary user data (timestamps, order numbers, ports) the model was asked to read, silently corrupted — the same desync-from-disk argument #537 uses to keep user/tool content untouched.
+
+- The gate's verified trigger shapes are all the BARE code as its own token — `code 11128 ...` (HTTP error line) and `{"code":11128,...}` (JSON body) — plus CJK-flanked mentions (`错误码11128`). `\b11128\b` (ASCII word boundary) fires for every one of those: spaces, `:`, `,`, quotes and CJK bytes are all non-word neighbors.
+- Longer digit runs (`1729111280`, `900111285`) and letter-flanked forms (`x11128x`, hash fragments, identifiers) now pass through byte-identical.
+- `identity_family_test.go`: six new matrix cases pin the boundary (json value, CJK-flanked, timestamp, order number, prefix-embedded, letter-flanked); all 0.9.79 coverage unchanged and green, full suite green under `-race`.
+
 ## 0.9.79
 
 ### The 11-128 gate went content-wide: the agent self-introduction verb family (field report 2026-10-27, deepseek-v4.1-flash, CN realm)

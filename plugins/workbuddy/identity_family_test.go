@@ -193,6 +193,18 @@ func TestSanitizeBlockedTemplatesNewcomers(t *testing.T) {
 		// The poisoning loop: a user pastes the upstream error back into the
 		// agent; the bare digits are a trigger, the hyphenated form passes.
 		{"pasted error digits", "HTTP 500 code 11128 unapproved channel", "HTTP 500 code 11-128 unapproved channel"},
+		// v0.9.80: the gate trigger is the BARE code — every known paste
+		// shape has the digits as their own token. 0.9.79's substring
+		// replace also rewrote 11128 embedded inside longer digit runs,
+		// silently corrupting logs/order numbers the model was asked to
+		// read (probe: ts=1729111280 -> ts=172911-1280). These pin the
+		// word-boundary behavior: embedded stays, bare rewrites.
+		{"json code value", `{"code":11128,"msg":"x"}`, `{"code":11-128,"msg":"x"}`},
+		{"cjk-flanked code", "错误码11128已复现", "错误码11-128已复现"},
+		{"timestamp keeps digits", "ts=1729111280 pid=31128", "ts=1729111280 pid=31128"},
+		{"order number keeps digits", "order 900111285 shipped", "order 900111285 shipped"},
+		{"prefix-embedded keeps digits", "ref=311128 end", "ref=311128 end"},
+		{"letter-flanked keeps digits", "hash x11128x tail", "hash x11128x tail"},
 		// Claude Code's billing header, value shape and bare shape. The value
 		// shape eats the trailing separator + spaces (wb-hub SANITIZE_HDR_RE
 		// semantics — the next token lands flush).
