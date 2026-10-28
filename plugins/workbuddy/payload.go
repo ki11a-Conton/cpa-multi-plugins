@@ -1048,6 +1048,42 @@ var (
 	// longer digit runs and letter-flanked forms untouched.
 	rePastedErrorCode          = regexp.MustCompile(`\b11128\b`)
 	pastedErrorCodeReplacement = "11-128"
+
+	// v0.9.81: Claude Code embeds cc_* key-value metadata (cc_entrypoint=
+	// and siblings) as text; the reference strips the pairs in every
+	// role (wb_proxy.py SANITIZE_KV_RE, in tree since the #516 era) as
+	// part of the same fingerprint family as the billing header above.
+	// \b keeps identifier-shaped hosts (foo_cc_x, gcc_=...) out; the
+	// fixpoint loop handles a pair whose value exposes another (the
+	// reference loops until stable the same way).
+	reCCKeyValue = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*`)
+
+	// v0.9.81: DSH's official @deepseek-ai/dsh-file-reference plugin
+	// (pulled in via @deepseek-ai/dsh-api-session-controller) injects
+	// FILE_REFERENCE_PROMPT into the system prompt, and that segment is
+	// the FOURTH confirmed member of the 11-128 content family
+	// (workbuddy2api-hub #675/#677/#680, fixes #681/#683/#684,
+	// 2026-10-27/28 single-variable replays on the CN realm):
+	//
+	//   A: Tokens prefixed with @ are paths the user explicitly referenced.
+	//   B: Relative paths resolve from the workspace root; absolute paths
+	//      identify files or directories on the host.
+	//   (+ a three-sentence tail about trailing slashes / read tool /
+	//    @"..." quoting)
+	//
+	// Boundary replays: each sentence alone 200; A+B contiguous 400
+	// (#683, 2026-10-27); the full five-sentence paragraph 400 while A+B
+	// alone passed on the next day's pool (#684) — the gate tightened,
+	// and the safe read is that the whole contiguous segment is the
+	// match unit. Either way the minimal fix is the same and breaks
+	// both: insert one "that" into sentence A, which preserves the
+	// meaning verbatim and makes the segment non-contiguous. The
+	// capture groups keep the original case (lowercase prompts stay
+	// lowercase), and the rewrite is naturally idempotent — the fixed
+	// sentence carries "paths that the user", which the pattern (paths
+	// immediately followed by "the user") can never match again.
+	// Scope matches the GUI segment: system/developer/assistant only.
+	reDshFileRef = regexp.MustCompile(`(?i)(Tokens prefixed with @ are paths )(the user explicitly referenced\.)`)
 )
 
 func sanitizeBlockedTemplates(s string) string {
@@ -1082,6 +1118,17 @@ func sanitizeBlockedTemplates(s string) string {
 	// as text; strip the value shape, then rename any bare leftovers.
 	s = reAnthropicBillingHeader.ReplaceAllString(s, "")
 	s = reAnthropicBareHeader.ReplaceAllString(s, "x-anthropic-billing-hdr")
+	// v0.9.81: Claude Code's cc_* key-value metadata pairs, all roles —
+	// same fingerprint family as the billing header (reference
+	// SANITIZE_KV_RE). Every productive pass strictly shortens the
+	// string, so the loop converges; the cap is pure paranoia.
+	for i := 0; i < 8; i++ {
+		r := reCCKeyValue.ReplaceAllString(s, "")
+		if r == s {
+			break
+		}
+		s = r
+	}
 	// v0.9.79: Claude Code feedback line — "give" phrasing is the verified
 	// trigger spelling, "provide" passes (workbuddy2api-hub SANITIZE_REWRITES).
 	s = strings.ReplaceAll(s,
@@ -1245,6 +1292,10 @@ func sanitizeIdentitySentences(s string) string {
 		}
 		return prefix + identitySelfIntroReplacement
 	})
+	// v0.9.81: DSH file-reference segment — runs between the verb family
+	// and the brand shrink, mirroring the reference order (identity
+	// sentence -> GUI segment -> file-reference -> brand).
+	out = reDshFileRef.ReplaceAllString(out, "${1}that ${2}")
 	out = reBrandProse.ReplaceAllString(out, brandProseReplacement)
 	return out
 }

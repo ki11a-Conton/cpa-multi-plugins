@@ -241,11 +241,16 @@ func TestPrepareUpstreamBodyDSHCurrentPrompt(t *testing.T) {
 	persona := "You are a coding agent powered by the deepseek-v4.1-flash model."
 	intro := "You are an AI agent powered by DeepSeek Harness."
 	webSurface := `You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.`
+	// v0.9.81: the CURRENT DSH system prompt also carries the
+	// file-reference segment (injected by the official
+	// @deepseek-ai/dsh-file-reference plugin) — the fourth 11-128
+	// family member. The e2e body must exercise it end to end.
+	fileRef := dshFileRefA + " " + dshFileRefB + dshFileRefTail
 	body := map[string]any{
 		"model":  "deepseek-v4.1-flash",
 		"stream": false,
 		"messages": []any{
-			map[string]any{"role": "system", "content": intro + "\n\n" + persona + "\n\n" + webSurface + "\n\nUse the read tool."},
+			map[string]any{"role": "system", "content": intro + "\n\n" + persona + "\n\n" + webSurface + "\n\n" + fileRef + "\n\nUse the read tool."},
 			map[string]any{"role": "user", "content": "debug this failure please"},
 			map[string]any{"role": "assistant", "content": "The error was: "},
 			map[string]any{"role": "user", "content": "HTTP 500 {\"code\":11128,\"msg\":\"Illegal API invocation from an unapproved channel\"} — and for the record: " + persona},
@@ -282,10 +287,20 @@ func TestPrepareUpstreamBodyDSHCurrentPrompt(t *testing.T) {
 		"deepseek harness web gui",
 		"deepseek harness web interface", // brand must shrink further
 		"deepseek harness",               // no prose brand left in system at all
+		// v0.9.81: the file-reference segment must leave with the
+		// "that" inserted — the raw contiguous form is the trigger.
+		"are paths the user explicitly referenced",
 	} {
 		if strings.Contains(sys, banned) {
 			t.Errorf("system content still carries trigger %q:\n%s", banned, obj.Messages[0].Content)
 		}
+	}
+	// v0.9.81: the "that"-inserted A sentence and the verbatim B+tail.
+	if !strings.Contains(obj.Messages[0].Content, dshFileRefAFixed) {
+		t.Errorf("file-reference A sentence should carry the inserted that, got:\n%s", obj.Messages[0].Content)
+	}
+	if !strings.Contains(obj.Messages[0].Content, dshFileRefB+dshFileRefTail) {
+		t.Errorf("file-reference B sentence and tail must survive verbatim, got:\n%s", obj.Messages[0].Content)
 	}
 	if !strings.Contains(obj.Messages[0].Content, "DeepSeek web interface whose URL the runtime context names") {
 		t.Errorf("web-surface line should read the shrunk-brand form, got:\n%s", obj.Messages[0].Content)
@@ -308,5 +323,127 @@ func TestPrepareUpstreamBodyDSHCurrentPrompt(t *testing.T) {
 	}
 	if !strings.Contains(user2, persona) {
 		t.Errorf("user-role quote of the identity sentence must survive, got %q", user2)
+	}
+}
+
+// v0.9.81: the DSH file-reference segment — the fourth confirmed member of
+// the 11-128 content family (wb2api-hub #675/#677/#680, fixes #681/#683/
+// #684). The official @deepseek-ai/dsh-file-reference plugin injects
+// FILE_REFERENCE_PROMPT into the system prompt; the segment (each sentence
+// alone 200, contiguous 400) is the gate's match unit, and inserting one
+// "that" into sentence A breaks it while preserving the meaning verbatim.
+const (
+	dshFileRefA      = "Tokens prefixed with @ are paths the user explicitly referenced."
+	dshFileRefAFixed = "Tokens prefixed with @ are paths that the user explicitly referenced."
+	dshFileRefB      = "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	dshFileRefTail   = " A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @\"...\" quotes a path containing spaces."
+)
+
+func TestSanitizeDshFileRefParagraph(t *testing.T) {
+	para := dshFileRefA + " " + dshFileRefB + dshFileRefTail
+	want := dshFileRefAFixed + " " + dshFileRefB + dshFileRefTail
+
+	// The full paragraph: sentence A gets exactly one "that", B and the
+	// tail survive byte-for-byte.
+	if got := sanitizeIdentitySentences(para); got != want {
+		t.Fatalf("full paragraph:\n got  %q\n want %q", got, want)
+	}
+	// Idempotent: the fixed sentence can never match again ("paths that
+	// the user" is not "paths the user").
+	once := sanitizeIdentitySentences(para)
+	if again := sanitizeIdentitySentences(once); again != once {
+		t.Fatalf("not idempotent:\n once  %q\n again %q", once, again)
+	}
+	// Sentence A alone rewrites the same way — DSH may reword the tail
+	// without the rule caring.
+	if got := sanitizeIdentitySentences(dshFileRefA); got != dshFileRefAFixed {
+		t.Fatalf("sentence A alone: got %q", got)
+	}
+	// Case-insensitive in, original case preserved out (capture groups;
+	// only the inserted "that" is literal).
+	if got := sanitizeIdentitySentences(strings.ToLower(para)); got != strings.ToLower(want) {
+		t.Fatalf("lowercase paragraph:\n got  %q\n want %q", got, strings.ToLower(want))
+	}
+	// Embedded with surrounding prompt text.
+	embedded := "You are a coding agent.\n\n" + para + "\n\nMore rules follow."
+	wantEmbedded := "You are a coding agent.\n\n" + want + "\n\nMore rules follow."
+	if got := sanitizeIdentitySentences(embedded); got != wantEmbedded {
+		t.Fatalf("embedded:\n got  %q\n want %q", got, wantEmbedded)
+	}
+	// Unrelated @ text is not touched: e-mail, npm package, Windows path.
+	for _, s := range []string{
+		"mail me at foo@bar.com",
+		"npm i @deepseek-ai/dsh",
+		`see C:\work\@cache for details`,
+	} {
+		if got := sanitizeIdentitySentences(s); got != s {
+			t.Errorf("unrelated @ text rewritten: %q -> %q", s, got)
+		}
+	}
+}
+
+func TestSanitizeDshFileRefRoleScope(t *testing.T) {
+	para := dshFileRefA + " " + dshFileRefB
+	fixed := dshFileRefAFixed + " " + dshFileRefB
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "system", "content": para},
+			map[string]any{"role": "developer", "content": para},
+			map[string]any{"role": "assistant", "content": para},
+			map[string]any{"role": "user", "content": para},
+			map[string]any{"role": "tool", "content": para},
+		},
+	}
+	if !sanitizeIdentityInPlace(body) {
+		t.Fatal("expected changes")
+	}
+	msgs := body["messages"].([]any)
+	for i, want := range []string{fixed, fixed, fixed, para, para} {
+		role := msgs[i].(map[string]any)["role"].(string)
+		if got := msgs[i].(map[string]any)["content"].(string); got != want {
+			t.Errorf("role %s:\n got  %q\n want %q", role, got, want)
+		}
+	}
+}
+
+// v0.9.81: Claude Code's cc_* key-value metadata pairs strip in every role
+// (reference SANITIZE_KV_RE, same fingerprint family as the billing header).
+func TestSanitizeCCKeyValuePairs(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"entrypoint pair", "meta cc_entrypoint=cli; rest", "meta rest"},
+		// No semicolon: the value class [^;\r\n]* runs to end of line —
+		// the reference's exact SANITIZE_KV_RE semantics (metadata comes
+		// in "k=v; k2=v2" blocks, so the value boundary is the ; or EOL).
+		{"pair without semicolon eats to eol", "cc_version=1.2.3 tail", ""},
+		{"uppercase pair", "CC_MODE=PROD; next", "next"},
+		{"nested pair fixpoint", "cc_a=cc_b=x; tail", "tail"},
+		{"multiple pairs", "cc_a=1; cc_b=2; tail", "tail"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeBlockedTemplates(tc.in); got != tc.want {
+				t.Fatalf("sanitizeBlockedTemplates(%q)\n got  %q\n want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// No word boundary before cc_ (identifier hosts) — untouched.
+	for _, s := range []string{
+		"foo_cc_x=1 stays",
+		"gcc_=nope also stays",
+		"the word occur here: successful",
+	} {
+		if got := sanitizeBlockedTemplates(s); got != s {
+			t.Errorf("boundary violation: %q -> %q", s, got)
+		}
+	}
+	// The strip reaches user messages too (all-roles family).
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "my config says cc_entrypoint=vscode; help"},
+		},
+	}
+	sanitizeHistoryPhrasesInPlace(body)
+	if got := body["messages"].([]any)[0].(map[string]any)["content"].(string); got != "my config says help" {
+		t.Errorf("user-role cc_ pair not stripped: %q", got)
 	}
 }

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.81
+
+### The fourth 11-128 family member: the DSH file-reference segment (field report 2026-10-28, persistent after 0.9.79)
+
+Second field report on the same CN realm / deepseek-v4.1-flash deployment: after updating to 0.9.79 the requests STILL died 400 `code 11128` — the scrubber had covered three of the family members and the fourth was still shipping verbatim. Root cause located in the reference cluster (workbuddy2api-hub #675/#677/#680, three converging fix PRs #681/#683/#684, single-variable replays 2026-10-27/28): DSH's official `@deepseek-ai/dsh-file-reference` plugin (pulled in via `@deepseek-ai/dsh-api-session-controller`) injects `FILE_REFERENCE_PROMPT` into the system prompt, and that segment is a fourth content trigger. Each sentence alone passes (200); contiguous they 400 — #683 measured the A+B pair as the unit on 10-27, #684 measured the full five-sentence paragraph as the unit on the next day's pool (the gate tightened in between; testing only the first two sentences can misread as "fixed"). DSH carries the segment on every request, which is why the whole client appeared hard-down.
+
+- `reDshFileRef`: insert exactly one `that` into sentence A — `Tokens prefixed with @ are paths the user explicitly referenced.` → `... paths that the user explicitly referenced.` The meaning is preserved verbatim, the segment stops matching, and the same one-word insertion breaks both observed boundaries (pair and full paragraph). Capture groups keep the original case; the rewrite is naturally idempotent (the fixed sentence can never match the pattern again — no lookahead needed in RE2). Scope matches the GUI segment: system/developer/assistant only; user/tool byte-identical (#537).
+- `reCCKeyValue` (all roles, `sanitizeBlockedTemplates`): Claude Code's `cc_*` key-value metadata pairs (`cc_entrypoint=...`) strip with the same semantics as the reference's `SANITIZE_KV_RE` (in their tree since the #516 era, same fingerprint family as the billing header) — a coverage gap 0.9.79 had left open. `\b` keeps identifier-shaped hosts (`foo_cc_x=`) out; a bounded fixpoint loop handles nested pairs; without a `;` the value runs to end of line exactly as the reference behaves.
+- Tests: `TestSanitizeDshFileRefParagraph` (full-paragraph rewrite, A-alone, idempotence, case preservation, embedding, unrelated @ text — e-mail / npm package / Windows path), `TestSanitizeDshFileRefRoleScope` (system/developer/assistant rewritten, user/tool pinned), `TestSanitizeCCKeyValuePairs` (five strip shapes + boundary pins + user-role reach), and the e2e current-DSH body extended with the full FILE_REFERENCE_PROMPT segment.
+- 11-128 error copy updated to the 0.9.81 coverage set (identity families, brand co-occurrence, GUI + file-reference segments, cc_ metadata, pasted error text).
+
 ## 0.9.80
 
 ### The pasted-error breaker stops eating embedded digits (review catch on 0.9.79)

@@ -437,8 +437,8 @@ func translateChatUpstreamErrorFull(statusCode int, payload string, sa *storedAu
 		// conversation, plugin update. The message itself spells the code
 		// hyphenated so an echo of this very text cannot re-arm the gate.
 		return fmt.Errorf(
-			"上游渠道风控（code 11-128）——由请求内容中的第三方 agent 身份特征串触发（0.9.79 起覆盖 DSH / Claude Code / Codex 身份句族、品牌共现与报错原文回贴），与账号状态无关。若本会话粘贴过上游报错或 agent 自我介绍，会话可能已被污染，请新开会话重试；持续出现请更新插件至最新版。"+
-				" // Upstream channel risk control (11-128) — triggered by third-party agent identity phrases in the request body (0.9.79 scrubs the DSH / Claude Code / Codex identity families, brand co-occurrence, and pasted error text), not by account state. A pasted upstream error or agent self-introduction poisons the whole conversation — start a new one; update the plugin if it persists. | raw: %s",
+			"上游渠道风控（code 11-128）——由请求内容中的第三方 agent 身份特征串触发（0.9.81 起覆盖 DSH / Claude Code / Codex 身份句族、品牌共现、GUI 与文件引用段、cc_ 元数据及报错原文回贴），与账号状态无关。若本会话粘贴过上游报错或 agent 自我介绍，会话可能已被污染，请新开会话重试；持续出现请更新插件至最新版。"+
+				" // Upstream channel risk control (11-128) — triggered by third-party agent identity phrases in the request body (0.9.81 scrubs the DSH / Claude Code / Codex identity families, brand co-occurrence, the GUI and file-reference segments, cc_ metadata, and pasted error text), not by account state. A pasted upstream error or agent self-introduction poisons the whole conversation — start a new one; update the plugin if it persists. | raw: %s",
 			truncateRedacted(payload, 200))
 	case isWafBlocked(statusCode, payload):
 		return fmt.Errorf(
